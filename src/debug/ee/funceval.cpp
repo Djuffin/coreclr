@@ -3462,12 +3462,20 @@ static void GCProtectArgsAndDoNormalFuncEval(DebuggerEval *pDE,
     _ASSERTE( pDE->m_appDomainId.m_dwId != 0 ); 
     ENTER_DOMAIN_ID( pDE->m_appDomainId );
 
-    // Wrap everything in a EX_TRY so we catch any exceptions that could be thrown.
-    // Note that we don't let any thrown exceptions cross the AppDomain boundary because we don't 
-    // want them to get marshalled.
-    EX_TRY
+
+    struct Param
     {
-        DoNormalFuncEval( 
+            DebuggerEval *pDE;
+            BYTE *pCatcherStackAddr;
+            OBJECTREF *pObjectRefArray;
+            void **pMaybeInteriorPtrArray;
+            void **pByRefMaybeInteriorPtrArray;
+            INT64 *pBufferForArgsArray;
+            ValueClassInfo ** ppProtectedValueClasses;
+#ifdef _DEBUG            
+            DataLocation *pDataLocationArray;
+#endif            
+    } param = {
             pDE, 
             pCatcherStackAddr,
             pObjectRefArray,
@@ -3476,18 +3484,46 @@ static void GCProtectArgsAndDoNormalFuncEval(DebuggerEval *pDE,
             pBufferForArgsArray,
             protectValueClassFrame.GetValueClassInfoList()
             DEBUG_ARG(pDataLocationArray)
-            );
-    }
-    EX_CATCH
+     };
+
+    // Wrap everything in a PAL_TRY so we catch any exceptions that could be thrown.
+    // Note that we don't let any thrown exceptions cross the AppDomain boundary because we don't 
+    // want them to get marshalled.
+    PAL_TRY(Param *, pParam, &param)
     {
+        DoNormalFuncEval( 
+            pParam->pDE, 
+            pParam->pCatcherStackAddr,
+            pParam->pObjectRefArray,
+            pParam->pMaybeInteriorPtrArray,
+            pParam->pByRefMaybeInteriorPtrArray,
+            pParam->pBufferForArgsArray,
+            pParam->ppProtectedValueClasses
+            DEBUG_ARG(pParam->pDataLocationArray)
+        );
+    }
+// GCPROTECT_BEGIN redefines 'return' macro and makes it impossible to use, but PAL_EXCEPT uses return inside of a C++ lambda
+// which is a completely valid usecase that doesn't violate GCPROTECT assumptions. That's why we temporary disable this macro.
+#pragma push_macro("return")    
+#undef return    
+    // Note: we need to catch all exceptioins here because they all get reported as the result of
+    // the funceval.  If a ThreadAbort occurred other than for a funcEval abort, we'll re-throw it manually.    
+    PAL_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+#pragma pop_macro("return") 
+    {
+        GCX_COOP();
         // We got an exception. Make the exception into our result.
-        OBJECTREF ppException = GET_THROWABLE();
+        Thread * pThread = GetThread();
+        _ASSERTE(pThread);
+        ThreadExceptionState* pExState = pThread->GetExceptionState();
+        _ASSERTE(pExState);
+        OBJECTREF ppException = pExState->GetThrowable();
         GCX_FORBID();
         RecordFuncEvalException( pDE, ppException);
     }
-    // Note: we need to catch all exceptioins here because they all get reported as the result of
-    // the funceval.  If a ThreadAbort occurred other than for a funcEval abort, we'll re-throw it manually.
-    EX_END_CATCH(SwallowAllExceptions);
+    PAL_ENDTRY
+
+
 
     // Restore context
     END_DOMAIN_TRANSITION;
@@ -3526,11 +3562,20 @@ void FuncEvalHijackRealWorker(DebuggerEval *pDE, Thread* pThread, FuncEvalFrame*
     OBJECTREF newObj = NULL;
     GCPROTECT_BEGIN(newObj);
 
-    // Wrap everything in a EX_TRY so we catch any exceptions that could be thrown.
+    struct Param
+    {
+        DebuggerEval *pDE;
+        OBJECTREF &newObj;
+    } param = { pDE, newObj };
+
+    // Wrap everything in a PAL_TRY so we catch any exceptions that could be thrown.
     // Note that we don't let any thrown exceptions cross the AppDomain boundary because we don't 
     // want them to get marshalled.
-    EX_TRY
+    PAL_TRY(Param *, pParam, &param)
     {
+        DebuggerEval *pDE = pParam->pDE;
+        OBJECTREF &newObj = pParam->newObj;
+
         DebuggerIPCE_TypeArgData *firstdata = pDE->GetTypeArgData();
         DWORD nGenericArgs = pDE->m_genericArgsCount;
 
@@ -3684,16 +3729,26 @@ void FuncEvalHijackRealWorker(DebuggerEval *pDE, Thread* pThread, FuncEvalFrame*
             _ASSERTE(!"Invalid eval type!");
         }
     }
-    EX_CATCH
+// GCPROTECT_BEGIN redefines 'return' macro and makes it impossible to use, but PAL_EXCEPT uses return inside of a C++ lambda
+// which is a completely valid usecase that doesn't violate GCPROTECT assumptions. That's why we temporary disable this macro.
+#pragma push_macro("return")    
+#undef return    
+    // Note: we need to catch all exceptioins here because they all get reported as the result of
+    // the funceval.  If a ThreadAbort occurred other than for a funcEval abort, we'll re-throw it manually.    
+    PAL_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+#pragma pop_macro("return") 
     {
+        GCX_COOP();
         // We got an exception. Make the exception into our result.
-        OBJECTREF ppException = GET_THROWABLE();
+        Thread * pThread = GetThread();
+        _ASSERTE(pThread);
+        ThreadExceptionState* pExState = pThread->GetExceptionState();
+        _ASSERTE(pExState);
+        OBJECTREF ppException = pExState->GetThrowable();
         GCX_FORBID();
         RecordFuncEvalException( pDE, ppException);
     }
-    // Note: we need to catch all exceptioins here because they all get reported as the result of
-    // the funceval.  If a ThreadAbort occurred other than for a funcEval abort, we'll re-throw it manually.
-    EX_END_CATCH(SwallowAllExceptions);
+    PAL_ENDTRY
 
     GCPROTECT_END();
 
